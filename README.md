@@ -139,9 +139,14 @@ un proceso de control fuera del cgroup no se ve afectado.
   ([runner-images #14783](https://github.com/actions/runner-images/issues/14783)).
   Por eso la medición real de enforcement del backstop está hecha en esta box
   (comando de arriba). En CI, el job `ebpf` compila y linkea el objeto (con BTF)
-  y el job `lsm` carga el objeto en el kernel y **registra el rechazo** del
-  attach, sin saltearse en silencio. Donde `bpf` sí esté en la lista LSM, el
-  mismo job corre la medición completa.
+  y el job `lsm` **lo mide en vez de saltearlo**: en el runner (LSMs activos
+  `lockdown,capability,landlock,yama,apparmor,ima,evm`) el **attach tiene éxito**
+  porque el kernel trae `CONFIG_BPF_LSM=y`, pero como `bpf` no es un LSM activo
+  el hook **nunca se invoca**. El job arma el cgroup y verifica empíricamente
+  que el hook queda **inerte: 0 denegaciones** y la apertura del sandbox pasa.
+  Esto muestra que un attach exitoso **no** prueba enforcement. Donde `bpf` sí
+  esté en la lista LSM, el mismo job corre la medición completa y exige la
+  denegación.
 - `IORING_REGISTER_RESTRICTIONS` es una allowlist **por opcode**, no por
   path/destino: no puede decir "este `OPENAT` sí y este no". Eso lo cubren
   Landlock (filesystem) y el backstop LSM.
@@ -214,9 +219,13 @@ Three layers, lowest to highest privilege:
   [runner-images #14783](https://github.com/actions/runner-images/issues/14783)).
   The real backstop enforcement is therefore measured on this box (command
   above). In CI the `ebpf` job builds and links the object (with BTF) and the
-  `lsm` job loads it into the kernel and **records the attach refusal** — not a
-  silent skip. Where `bpf` is in the LSM list the same job runs the full
-  measurement.
+  `lsm` job **measures instead of skipping**: on the runner (active LSMs
+  `lockdown,capability,landlock,yama,apparmor,ima,evm`) the **attach succeeds**
+  because the kernel has `CONFIG_BPF_LSM=y`, but since `bpf` is not an active
+  LSM the hook is **never invoked**. The job arms the cgroup and empirically
+  checks the hook is **inert: 0 denials** and the sandboxed open goes through.
+  So a successful attach does **not** prove enforcement. Where `bpf` is in the
+  LSM list the same job runs the full measurement and requires the denial.
 - `IORING_REGISTER_RESTRICTIONS` is a **per-opcode** allowlist, not per
   path/target; Landlock and the LSM backstop cover the path/target policy.
 - Layer 1 protects the ring the app itself creates restricted, not an
