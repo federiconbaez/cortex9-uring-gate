@@ -75,16 +75,6 @@ impl Backstop {
         if !crate::probe::bpf_in_lsm() {
             return Err(LsmError::NoBpfLsm { lsm });
         }
-        Self::load_unchecked()
-    }
-
-    /// Load and attach without checking the active LSM list.
-    ///
-    /// On a kernel built with `CONFIG_BPF_LSM=y` but without `bpf` in the boot
-    /// `lsm=` list, the attach *succeeds* yet the hook is never called. This is
-    /// used to measure that inert state empirically instead of trusting the
-    /// attach result.
-    pub fn load_unchecked() -> Result<Self, LsmError> {
         let bytes = read_object()?;
         let mut ebpf = Ebpf::load(&bytes).map_err(aya_err)?;
         let btf = Btf::from_sys_fs().map_err(aya_err)?;
@@ -130,14 +120,6 @@ impl Backstop {
         .map_err(aya_err)?;
         arr.get(&slot, 0).map_err(aya_err)
     }
-}
-
-/// Just parse and load the object + maps into the kernel (runs no attach).
-/// Proves the eBPF object is valid on this kernel even where BPF-LSM is off.
-pub fn object_loads() -> Result<(), LsmError> {
-    let bytes = read_object()?;
-    Ebpf::load(&bytes).map_err(aya_err)?;
-    Ok(())
 }
 
 /// Try the full load + attach and return the detailed error if it fails.

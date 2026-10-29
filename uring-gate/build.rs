@@ -2,7 +2,7 @@
 //!
 //! Without it the crate still builds on stable (no bpf-linker needed); the
 //! `uring-gate-lsm` binary then reports the object is missing and the CI
-//! `lsm` job, which sets the variable, fails visibly instead of skipping.
+//! `enforce` workflow, which sets the variable, fails visibly instead of skipping.
 use std::path::Path;
 
 fn main() {

@@ -5,7 +5,7 @@
 //! direct syscall, while a control process outside the cgroup is unaffected.
 //!
 //! It exits non-zero (never skips) if `bpf` is not in the active LSM list, so
-//! the CI job fails visibly on a kernel without BPF-LSM.
+//! the `enforce` workflow fails visibly on a kernel without BPF-LSM.
 
 use clap::{Parser, Subcommand};
 use std::ffi::CString;
@@ -27,9 +27,6 @@ struct Cli {
 enum Cmd {
     /// Load, arm against a fresh cgroup, and measure io_uring vs syscall denial.
     Measure,
-    /// CI gate: measure if BPF-LSM is active, else prove the object loads and
-    /// record the kernel's refusal. Never a silent skip; fails on inconsistency.
-    CiCheck,
     /// Hidden: child that joins `dir` cgroup then attempts both opens.
     #[command(hide = true)]
     ChildCgroup { dir: String },
@@ -41,7 +38,6 @@ enum Cmd {
 fn main() {
     std::process::exit(match Cli::parse().cmd {
         Cmd::Measure => cmd_measure(),
-        Cmd::CiCheck => cmd_ci_check(),
         Cmd::ChildCgroup { dir } => child_attempts(Some(&dir)),
         Cmd::ChildControl => child_attempts(None),
     });
@@ -190,64 +186,6 @@ fn cmd_measure() -> i32 {
                 0
             } else {
                 eprintln!("FAIL: expected sandboxed denied (both) and control allowed (both) with >=2 denials");
-                1
-            }
-        }
-        Err(e) => {
-            eprintln!("FAIL: {e}");
-            2
-        }
-    }
-}
-
-fn cmd_ci_check() -> i32 {
-    let lsm = uring_gate::probe::lsm_list();
-    let has = uring_gate::probe::bpf_in_lsm();
-    println!("active LSMs:  {lsm}");
-    println!("bpf in LSM:  {has}");
-
-    if has {
-        println!("BPF-LSM is active: running the full enforcement measurement.");
-        return cmd_measure();
-    }
-
-    // Hosted GitHub runners build CONFIG_BPF_LSM=y but do not list `bpf` in the
-    // boot `lsm=` (runner-images #14783). There the attach succeeds but the hook
-    // is never invoked. Do not trust the attach: measure it.
-    match uring_gate::lsm::object_loads() {
-        Ok(()) => println!("eBPF object loads into the kernel."),
-        Err(e) => {
-            eprintln!("FAIL: eBPF object did not load on this kernel: {e}");
-            return 1;
-        }
-    }
-    let mut bs = match Backstop::load_unchecked() {
-        Ok(b) => {
-            println!("attach succeeded with bpf inactive; measuring whether the hook enforces.");
-            b
-        }
-        Err(e) => {
-            // Some kernels refuse the attach outright: also a valid, recorded
-            // outcome for "BPF-LSM unavailable".
-            println!("attach refused on a kernel without active BPF-LSM: {e}");
-            println!("MEASURE lsm_enforcement=unavailable (attach refused)");
-            return 0;
-        }
-    };
-    match run_cgroup(&mut bs) {
-        Ok(r) => {
-            print_result(&r);
-            println!(
-                "MEASURE lsm_enforcement=inert lsm_file_open_denied={} sandboxed_uring={} (bpf not an active LSM)",
-                r.denied, r.s_uring
-            );
-            // With bpf inactive the hook must be inert: nothing denied, and the
-            // sandboxed open goes through. Anything else is an inconsistency.
-            if r.denied == 0 && r.s_uring == "allowed" && r.s_direct == "allowed" {
-                println!("OK: hook attached but inert (0 denials) because bpf is not an active LSM; enforcement is measured where it is (see README).");
-                0
-            } else {
-                eprintln!("FAIL: bpf inactive yet the hook denied {} opens; inconsistent with the LSM list", r.denied);
                 1
             }
         }
