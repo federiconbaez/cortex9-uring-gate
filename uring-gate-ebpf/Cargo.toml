@@ -1,0 +1,36 @@
+[package]
+name = "uring-gate-ebpf"
+description = "eBPF LSM side of uring-gate: file_open and uring_cmd hooks filtered by cgroup."
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+authors = ["Federico Nicolas Báez Rizzo"]
+publish = false
+
+[dependencies]
+aya-ebpf = "0.2.1"
+uring-gate-common = { path = "../uring-gate-common" }
+
+[[bin]]
+name = "uring-gate-ebpf"
+path = "src/main.rs"
+
+[profile.dev]
+opt-level = 3
+debug = false
+debug-assertions = false
+overflow-checks = false
+lto = true
+panic = "abort"
+incremental = false
+codegen-units = 1
+rpath = false
+
+[profile.release]
+lto = true
+panic = "abort"
+codegen-units = 1
+debug = 2
+
+# Standalone workspace: built with nightly for bpfel-unknown-none.
+[workspace]
