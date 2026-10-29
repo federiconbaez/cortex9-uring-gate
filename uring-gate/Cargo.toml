@@ -1,0 +1,35 @@
+[package]
+name = "uring-gate"
+description = "Sandbox io_uring with IORING_REGISTER_RESTRICTIONS + seccomp + Landlock, and an optional BPF-LSM backstop, instead of banning io_uring."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+default-run = "uring-gate"
+
+[dependencies]
+clap = { version = "4", features = ["derive"] }
+libc = "0.2"
+
+# BPF-LSM backstop. Needs root and `bpf` in /sys/kernel/security/lsm; off by
+# default so the unprivileged core builds and tests without a BPF toolchain.
+aya = { version = "0.14", optional = true }
+uring-gate-common = { path = "../uring-gate-common" }
+
+[features]
+default = []
+lsm = ["dep:aya"]
+
+[[bin]]
+name = "uring-gate"
+path = "src/bin/uring-gate.rs"
+
+[[bin]]
+name = "uring-gate-lsm"
+path = "src/bin/uring-gate-lsm.rs"
+required-features = ["lsm"]
+
+[lib]
+name = "uring_gate"
+path = "src/lib.rs"
