@@ -14,7 +14,7 @@ env:
 
 jobs:
   check:
-    name: fmt · clippy · test (unprivileged core: restrictions + seccomp + Landlock)
+    name: "fmt · clippy · test (unprivileged core: restrictions + seccomp + Landlock)"
     runs-on: ubuntu-latest
     env:
       RUSTFLAGS: -D warnings
