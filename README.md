@@ -111,16 +111,20 @@ son de archivo (`connect`/`socket`/`uring_cmd`) y la allowlist de opcodes.
 #### Backstop BPF-LSM (root)
 
 ```sh
-sudo ./target/release/uring-gate-lsm ci-check
+sudo -E ./target/release/uring-gate-lsm measure
 ```
 
 ```text
-active LSMs:  capability,landlock,selinux,bpf
-bpf in LSM:  true
 sandboxed     direct=denied uring=denied
 control       direct=allowed uring=allowed
-MEASURE lsm_file_open_denied=2 ...
+MEASURE lsm_file_open_denied=2 sandboxed_uring=denied sandboxed_direct=denied control_uring=allowed
+OK: BPF-LSM denies io_uring OPENAT for the sandboxed cgroup exactly like the syscall; control unaffected
 ```
+
+Re-medido en esta box el 2026-10-29 con sudo (kernel 6.12.94+, `lsm =
+capability,landlock,selinux,bpf`): 3 corridas de 3 dieron el mismo resultado y
+salieron con código 0. **Esta es la única medición de enforcement BPF-LSM que
+existe para este proyecto**: no se midió en CI (ver abajo).
 
 El programa eBPF engancha `security_file_open` y `security_uring_cmd` y filtra
 por **cgroup id** (no por comm/pid: un op de io_uring puede correr en un worker
@@ -134,19 +138,20 @@ un proceso de control fuera del cgroup no se ve afectado.
   suficiente para probar que el hook cubre `io_uring` igual que la syscall. Una
   política de producción consultaría un mapa allowlist por inode/path (trabajo
   CO-RE adicional); está fuera de alcance acá.
-- **Los runners hosteados de GitHub no activan BPF-LSM**: tienen
-  `CONFIG_BPF_LSM=y` pero `bpf` no está en `lsm=` del arranque
-  ([runner-images #14783](https://github.com/actions/runner-images/issues/14783)).
-  Por eso la medición real de enforcement del backstop está hecha en esta box
-  (comando de arriba). En CI, el job `ebpf` compila y linkea el objeto (con BTF)
-  y el job `lsm` **lo mide en vez de saltearlo**: en el runner (LSMs activos
-  `lockdown,capability,landlock,yama,apparmor,ima,evm`) el **attach tiene éxito**
-  porque el kernel trae `CONFIG_BPF_LSM=y`, pero como `bpf` no es un LSM activo
-  el hook **nunca se invoca**. El job arma el cgroup y verifica empíricamente
-  que el hook queda **inerte: 0 denegaciones** y la apertura del sandbox pasa.
-  Esto muestra que un attach exitoso **no** prueba enforcement. Donde `bpf` sí
-  esté en la lista LSM, el mismo job corre la medición completa y exige la
-  denegación.
+- **El workflow `enforce.yml` está en rojo a propósito en los runners de
+  GitHub.** Los runners hosteados tienen `CONFIG_BPF_LSM=y` pero `bpf` no está
+  en el `lsm=` del arranque
+  ([runner-images #14783](https://github.com/actions/runner-images/issues/14783)),
+  así que el hook se puede adjuntar pero el kernel nunca lo invoca. `enforce.yml`
+  compila el objeto eBPF y corre `sudo -E uring-gate-lsm measure`, que **falla**
+  con `bpf is not in the active LSM list` cuando `bpf` no aparece en
+  `/sys/kernel/security/lsm`. No hay skip ni `continue-on-error`: un verde ahí
+  sin `bpf` activo no probaría nada. En un runner con `bpf` en la lista LSM el
+  mismo workflow corre la medición completa y exige la denegación.
+- **El enforcement se midió solo en esta box con sudo** (sección de arriba). El
+  workflow `ci.yml` (verde) cubre fmt, clippy, los tests sin privilegios, las
+  mediciones (a) y (b), y la compilación del objeto eBPF; **no** prueba
+  enforcement BPF-LSM.
 - `IORING_REGISTER_RESTRICTIONS` es una allowlist **por opcode**, no por
   path/destino: no puede decir "este `OPENAT` sí y este no". Eso lo cubren
   Landlock (filesystem) y el backstop LSM.
@@ -167,7 +172,7 @@ cd uring-gate-ebpf && cargo build --release
 # Backstop (root + feature lsm):
 export URING_GATE_EBPF_OBJ="$PWD/uring-gate-ebpf/target/bpfel-unknown-none/release/uring-gate-ebpf"
 cargo build --release --features lsm --bin uring-gate-lsm
-sudo ./target/release/uring-gate-lsm ci-check
+sudo -E ./target/release/uring-gate-lsm measure
 ```
 
 ### Licencia
@@ -206,26 +211,30 @@ Three layers, lowest to highest privilege:
 - **(b) ≥ 85% throughput** — `uring-gate bench --iters 1000000`:
   **ratio ≈ 1.00×** of native (vs 0% if io_uring were banned).
 - **Landlock covers io_uring OPENAT** — `uring-gate probe`: `covers=true`.
-- **BPF-LSM backstop** — `sudo uring-gate-lsm ci-check`: sandboxed cgroup gets
-  both direct and io_uring `OPENAT` denied; control process unaffected.
+- **BPF-LSM backstop** — `sudo -E uring-gate-lsm measure`: sandboxed cgroup
+  gets both direct and io_uring `OPENAT` denied (`lsm_file_open_denied=2`);
+  control process unaffected. Re-measured on this box on 2026-10-29 with sudo:
+  3 of 3 runs gave the same result and exited 0. **This is the only BPF-LSM
+  enforcement measurement for this project**; it was not measured in CI.
 
 ### Honest limits
 
 - The backstop's demo policy is "deny all `file_open` for the cgroup": enough to
   prove the hook covers io_uring like the syscall. A production policy would
   consult a per-inode/path allowlist map (extra CO-RE work), out of scope here.
-- **GitHub hosted runners do not activate BPF-LSM** (`CONFIG_BPF_LSM=y` but `bpf`
-  not in the boot `lsm=` list,
-  [runner-images #14783](https://github.com/actions/runner-images/issues/14783)).
-  The real backstop enforcement is therefore measured on this box (command
-  above). In CI the `ebpf` job builds and links the object (with BTF) and the
-  `lsm` job **measures instead of skipping**: on the runner (active LSMs
-  `lockdown,capability,landlock,yama,apparmor,ima,evm`) the **attach succeeds**
-  because the kernel has `CONFIG_BPF_LSM=y`, but since `bpf` is not an active
-  LSM the hook is **never invoked**. The job arms the cgroup and empirically
-  checks the hook is **inert: 0 denials** and the sandboxed open goes through.
-  So a successful attach does **not** prove enforcement. Where `bpf` is in the
-  LSM list the same job runs the full measurement and requires the denial.
+- **The `enforce.yml` workflow is red on purpose on GitHub runners.** Hosted
+  runners have `CONFIG_BPF_LSM=y` but `bpf` is not in the boot `lsm=` list
+  ([runner-images #14783](https://github.com/actions/runner-images/issues/14783)),
+  so the hook can attach but the kernel never invokes it. `enforce.yml` builds
+  the eBPF object and runs `sudo -E uring-gate-lsm measure`, which **fails** with
+  `bpf is not in the active LSM list` when `bpf` is missing from
+  `/sys/kernel/security/lsm`. No skip and no `continue-on-error`: a green there
+  without an active `bpf` LSM would prove nothing. On a runner with `bpf` in the
+  LSM list the same workflow runs the full measurement and requires the denial.
+- **Enforcement was measured only on this box with sudo** (see above). The
+  `ci.yml` workflow (green) covers fmt, clippy, the unprivileged tests, the (a)
+  and (b) measurements and the eBPF object build; it does **not** prove BPF-LSM
+  enforcement.
 - `IORING_REGISTER_RESTRICTIONS` is a **per-opcode** allowlist, not per
   path/target; Landlock and the LSM backstop cover the path/target policy.
 - Layer 1 protects the ring the app itself creates restricted, not an
