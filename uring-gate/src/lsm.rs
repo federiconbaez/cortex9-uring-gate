@@ -68,12 +68,23 @@ pub struct Backstop {
 }
 
 impl Backstop {
-    /// Load the object and attach both LSM hooks.
+    /// Load the object and attach both LSM hooks. Fails if `bpf` is not an
+    /// active LSM, since then the hooks would attach but never be invoked.
     pub fn load() -> Result<Self, LsmError> {
         let lsm = crate::probe::lsm_list();
         if !crate::probe::bpf_in_lsm() {
             return Err(LsmError::NoBpfLsm { lsm });
         }
+        Self::load_unchecked()
+    }
+
+    /// Load and attach without checking the active LSM list.
+    ///
+    /// On a kernel built with `CONFIG_BPF_LSM=y` but without `bpf` in the boot
+    /// `lsm=` list, the attach *succeeds* yet the hook is never called. This is
+    /// used to measure that inert state empirically instead of trusting the
+    /// attach result.
+    pub fn load_unchecked() -> Result<Self, LsmError> {
         let bytes = read_object()?;
         let mut ebpf = Ebpf::load(&bytes).map_err(aya_err)?;
         let btf = Btf::from_sys_fs().map_err(aya_err)?;

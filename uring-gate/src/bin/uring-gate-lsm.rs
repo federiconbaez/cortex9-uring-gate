@@ -125,6 +125,46 @@ fn run_child(args: &[&str]) -> std::io::Result<(String, String)> {
     Ok((d, u))
 }
 
+/// Outcome of one cgroup measurement with the backstop attached and armed.
+struct CgroupResult {
+    s_direct: String,
+    s_uring: String,
+    c_direct: String,
+    c_uring: String,
+    denied: u64,
+}
+
+/// Arm `bs` against a fresh cgroup and run the sandboxed + control children.
+fn run_cgroup(bs: &mut Backstop) -> Result<CgroupResult, String> {
+    let dir = format!("/sys/fs/cgroup/uring-gate-{}", std::process::id());
+    std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir {dir}: {e}"))?;
+    let res = (|| -> Result<CgroupResult, String> {
+        let cid = lsm::cgroup_id(&dir).map_err(|e| e.to_string())?;
+        bs.arm(cid, true).map_err(|e| e.to_string())?;
+        println!("cgroup        {dir} (id={cid})");
+        let (s_direct, s_uring) = run_child(&["child-cgroup", &dir]).map_err(|e| e.to_string())?;
+        let (c_direct, c_uring) = run_child(&["child-control"]).map_err(|e| e.to_string())?;
+        let denied = bs
+            .counter(lsm::slot::FILE_OPEN_DENIED)
+            .map_err(|e| e.to_string())?;
+        Ok(CgroupResult {
+            s_direct,
+            s_uring,
+            c_direct,
+            c_uring,
+            denied,
+        })
+    })();
+    let _ = std::fs::remove_dir(&dir);
+    res
+}
+
+fn print_result(r: &CgroupResult) {
+    println!("sandboxed     direct={} uring={}", r.s_direct, r.s_uring);
+    println!("control       direct={} uring={}", r.c_direct, r.c_uring);
+}
+
+/// Full enforcement measurement; requires `bpf` to be an active LSM.
 fn cmd_measure() -> i32 {
     let mut bs = match Backstop::load() {
         Ok(b) => b,
@@ -133,42 +173,26 @@ fn cmd_measure() -> i32 {
             return 1;
         }
     };
-    let dir = format!("/sys/fs/cgroup/uring-gate-{}", std::process::id());
-    if let Err(e) = std::fs::create_dir_all(&dir) {
-        eprintln!("FAIL: mkdir {dir}: {e}");
-        return 2;
-    }
-    let result = (|| -> Result<i32, String> {
-        let cid = lsm::cgroup_id(&dir).map_err(|e| e.to_string())?;
-        bs.arm(cid, true).map_err(|e| e.to_string())?;
-        println!("cgroup        {dir} (id={cid})");
-
-        let (s_direct, s_uring) = run_child(&["child-cgroup", &dir]).map_err(|e| e.to_string())?;
-        let (c_direct, c_uring) = run_child(&["child-control"]).map_err(|e| e.to_string())?;
-        let denied = bs
-            .counter(lsm::slot::FILE_OPEN_DENIED)
-            .map_err(|e| e.to_string())?;
-
-        println!("sandboxed     direct={s_direct} uring={s_uring}");
-        println!("control       direct={c_direct} uring={c_uring}");
-        println!("MEASURE lsm_file_open_denied={denied} sandboxed_uring={s_uring} sandboxed_direct={s_direct} control_uring={c_uring}");
-
-        let ok = s_direct == "denied"
-            && s_uring == "denied"
-            && c_direct == "allowed"
-            && c_uring == "allowed"
-            && denied >= 2;
-        if ok {
-            println!("OK: BPF-LSM denies io_uring OPENAT for the sandboxed cgroup exactly like the syscall; control unaffected");
-            Ok(0)
-        } else {
-            eprintln!("FAIL: expected sandboxed denied (both) and control allowed (both) with >=2 denials");
-            Ok(1)
+    match run_cgroup(&mut bs) {
+        Ok(r) => {
+            print_result(&r);
+            println!(
+                "MEASURE lsm_file_open_denied={} sandboxed_uring={} sandboxed_direct={} control_uring={}",
+                r.denied, r.s_uring, r.s_direct, r.c_uring
+            );
+            let ok = r.s_direct == "denied"
+                && r.s_uring == "denied"
+                && r.c_direct == "allowed"
+                && r.c_uring == "allowed"
+                && r.denied >= 2;
+            if ok {
+                println!("OK: BPF-LSM denies io_uring OPENAT for the sandboxed cgroup exactly like the syscall; control unaffected");
+                0
+            } else {
+                eprintln!("FAIL: expected sandboxed denied (both) and control allowed (both) with >=2 denials");
+                1
+            }
         }
-    })();
-    let _ = std::fs::remove_dir(&dir);
-    match result {
-        Ok(code) => code,
         Err(e) => {
             eprintln!("FAIL: {e}");
             2
@@ -183,35 +207,53 @@ fn cmd_ci_check() -> i32 {
     println!("bpf in LSM:  {has}");
 
     if has {
-        // Real enforcement must be measurable here.
         println!("BPF-LSM is active: running the full enforcement measurement.");
         return cmd_measure();
     }
 
-    // Hosted GitHub runners do not activate BPF-LSM (runner-images #14783).
-    // Do NOT skip silently: prove the object is valid on this kernel, then try
-    // the attach and record the refusal.
+    // Hosted GitHub runners build CONFIG_BPF_LSM=y but do not list `bpf` in the
+    // boot `lsm=` (runner-images #14783). There the attach succeeds but the hook
+    // is never invoked. Do not trust the attach: measure it.
     match uring_gate::lsm::object_loads() {
-        Ok(()) => println!("eBPF object loads into the kernel (maps + verifier OK)."),
+        Ok(()) => println!("eBPF object loads into the kernel."),
         Err(e) => {
             eprintln!("FAIL: eBPF object did not load on this kernel: {e}");
             return 1;
         }
     }
-    match uring_gate::lsm::attempt_attach() {
-        Ok(()) => {
-            // Attach unexpectedly worked without bpf in the LSM list: then
-            // enforcement should be measurable, so measure it.
-            println!("attach succeeded despite bpf absent from the LSM list; measuring.");
-            cmd_measure()
+    let mut bs = match Backstop::load_unchecked() {
+        Ok(b) => {
+            println!("attach succeeded with bpf inactive; measuring whether the hook enforces.");
+            b
         }
         Err(e) => {
-            println!("attach refused as expected on a kernel without BPF-LSM: {e}");
-            println!("MEASURE lsm_enforcement=unavailable (bpf not in active LSM list)");
+            // Some kernels refuse the attach outright: also a valid, recorded
+            // outcome for "BPF-LSM unavailable".
+            println!("attach refused on a kernel without active BPF-LSM: {e}");
+            println!("MEASURE lsm_enforcement=unavailable (attach refused)");
+            return 0;
+        }
+    };
+    match run_cgroup(&mut bs) {
+        Ok(r) => {
+            print_result(&r);
             println!(
-                "OK: object is valid and the unavailability is detected; enforcement is measured on a kernel with bpf in the LSM list (see README)."
+                "MEASURE lsm_enforcement=inert lsm_file_open_denied={} sandboxed_uring={} (bpf not an active LSM)",
+                r.denied, r.s_uring
             );
-            0
+            // With bpf inactive the hook must be inert: nothing denied, and the
+            // sandboxed open goes through. Anything else is an inconsistency.
+            if r.denied == 0 && r.s_uring == "allowed" && r.s_direct == "allowed" {
+                println!("OK: hook attached but inert (0 denials) because bpf is not an active LSM; enforcement is measured where it is (see README).");
+                0
+            } else {
+                eprintln!("FAIL: bpf inactive yet the hook denied {} opens; inconsistent with the LSM list", r.denied);
+                1
+            }
+        }
+        Err(e) => {
+            eprintln!("FAIL: {e}");
+            2
         }
     }
 }
