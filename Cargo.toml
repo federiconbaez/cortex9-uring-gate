@@ -1,0 +1,17 @@
+[workspace]
+resolver = "2"
+members = ["uring-gate", "uring-gate-common"]
+# The eBPF crate targets `bpfel-unknown-none` with nightly and has its own
+# workspace (see uring-gate-ebpf/rust-toolchain.toml).
+exclude = ["uring-gate-ebpf"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+authors = ["Federico Nicolas Báez Rizzo"]
+repository = "https://github.com/federiconbaez/cortex9-uring-gate"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
